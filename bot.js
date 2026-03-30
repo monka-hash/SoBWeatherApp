@@ -8,6 +8,7 @@ if (RENDER_URL) {
     fetch(RENDER_URL).catch((err) => console.error("Keep-alive ping failed:", err));
   }, 30_000);
 }
+
 require('dotenv').config({ path: 'token.env' });
 const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
 
@@ -19,7 +20,7 @@ const client = new Client({
   ],
 });
 
-const YR_USER_AGENT = "SunnyBot/1.0 m.thomsen96@outlook.com"; // <-- Update this
+const YR_USER_AGENT = "SunnyBot/1.0 m.thomsen96@outlook.com";
 
 // Sunny symbol codes from MET/Yr
 const SUNNY_CODES = [
@@ -144,14 +145,12 @@ function buildOutlookEmbed(locationName, timeseries) {
   const COND = {
     sunny:       { icon: "☀️",  label: "Sunny" },
     partlysunny: { icon: "🌤️", label: "Partly Sunny" },
-    cloudy:      { icon: "☁️",  label: "Cloudy" },
-    rain:        { icon: "🌧️", label: "Rain" },
-    unknown:     { icon: "❓",  label: "Unknown" },
   };
 
-  const lines = days.map((date) => {
+  const lines = days.flatMap((date) => {
     const entries = byDay[date];
     const condition = classifyDay(entries);
+    if (condition !== "sunny" && condition !== "partlysunny") return [];
     const temps = getDayTemps(entries);
     const d = new Date(date + "T12:00:00Z");
     const dayStr = d.toLocaleDateString("en-GB", {
@@ -163,20 +162,16 @@ function buildOutlookEmbed(locationName, timeseries) {
       ? `${Math.round(temps.min)}–${Math.round(temps.max)}°C`
       : "N/A";
     const { icon, label } = COND[condition];
-    const isGood = condition === "sunny" || condition === "partlysunny";
-    return `${icon} **${dayStr}** — ${label}${isGood ? "" : ""} · ${tempStr}`;
+    return [`${icon} **${dayStr}** — ${label} · ${tempStr}`];
   });
 
-  const goodDays = days.filter((d) => {
-    const c = classifyDay(byDay[d]);
-    return c === "sunny" || c === "partlysunny";
-  }).length;
-
   return new EmbedBuilder()
-    .setColor(goodDays > 0 ? 0xffd700 : 0x5b8dee)
-    .setTitle(`📅 7-Day Sunny Outlook — ${locationName}`)
+    .setColor(lines.length > 0 ? 0xffd700 : 0x5b8dee)
+    .setTitle(`📅 Sunny Days Ahead — ${locationName}`)
     .setDescription(
-      `☀️ Sunny and 🌤️ Partly Sunny days have no rain.\n\n${lines.join("\n")}`
+      lines.length > 0
+        ? lines.join("\n")
+        : "No sunny or partly sunny days in the next 7 days. ☁️"
     )
     .setFooter({ text: "Powered by Yr / MET Norway • yr.no" })
     .setTimestamp();
@@ -201,26 +196,10 @@ function buildSunnyEmbed(locationName, timeseries) {
       `Great news — clear skies ahead in **${locationName}**. Get outside! 🌞`
     )
     .addFields(
-      {
-        name: "🌡️ Temperature",
-        value: formatTemperature(temp),
-        inline: true,
-      },
-      {
-        name: "💨 Wind",
-        value: `${Math.round(wind)} m/s`,
-        inline: true,
-      },
-      {
-        name: "💧 Humidity",
-        value: `${Math.round(humidity)}%`,
-        inline: true,
-      },
-      {
-        name: "🌤️ Condition",
-        value: symbol.replace(/_/g, " "),
-        inline: true,
-      }
+      { name: "🌡️ Temperature", value: formatTemperature(temp), inline: true },
+      { name: "💨 Wind", value: `${Math.round(wind)} m/s`, inline: true },
+      { name: "💧 Humidity", value: `${Math.round(humidity)}%`, inline: true },
+      { name: "🌤️ Condition", value: symbol.replace(/_/g, " "), inline: true }
     )
     .setFooter({ text: "Powered by Yr / MET Norway • yr.no" })
     .setTimestamp();
@@ -236,7 +215,6 @@ function buildNotSunnyEmbed(locationName, timeseries) {
     "unknown";
   const temp = now.data?.instant?.details?.air_temperature;
 
-  // Look ahead for next sunny period
   let nextSunny = null;
   for (const entry of timeseries.slice(1, 48)) {
     const s =
@@ -284,15 +262,11 @@ function buildNotSunnyEmbed(locationName, timeseries) {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-// !sunny <city>
-// !sunny lat=<lat> lon=<lon>
-// !sunnycheck - check all preset locations
-
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
   const content = message.content.trim();
 
-  // !sunny
+  // !sunny <city> or !sunny lat=<lat> lon=<lon>
   if (content === "!sunny" || content.startsWith("!sunny ")) {
     const args = content.slice("!sunny".length).trim();
 
@@ -305,7 +279,6 @@ client.on("messageCreate", async (message) => {
       );
     }
 
-    // lat/lon mode
     const latMatch = args.match(/lat=([\d.\-]+)/i);
     const lonMatch = args.match(/lon=([\d.\-]+)/i);
     if (latMatch && lonMatch) {
@@ -313,7 +286,6 @@ client.on("messageCreate", async (message) => {
       lon = parseFloat(lonMatch[1]);
       locationName = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
     } else {
-      // Named city
       const key = args.toLowerCase().replace(/\s+/g, "_");
       const loc = LOCATIONS[key];
       if (!loc) {
@@ -346,7 +318,7 @@ client.on("messageCreate", async (message) => {
     }
   }
 
-  // !sunwatch — posts when it becomes sunny (checks every hour)
+  // !sunwatch <city>
   if (content === "!sunwatch" || content.startsWith("!sunwatch ")) {
     const args = content.slice("!sunwatch".length).trim();
     if (!args) {
@@ -391,9 +363,8 @@ client.on("messageCreate", async (message) => {
       } catch (e) {
         console.error("sunwatch error:", e);
       }
-    }, 60 * 60 * 1000); // check every hour
+    }, 60 * 60 * 1000);
 
-    // Stop after 24 hours
     setTimeout(() => {
       clearInterval(interval);
       message.channel.send(
@@ -402,12 +373,12 @@ client.on("messageCreate", async (message) => {
     }, 24 * 60 * 60 * 1000);
   }
 
-  // !sunnydays <city> — 7-day outlook table
-  if (content.startsWith("!sunnydays")) {
+  // !sunnydays <city> — 7-day outlook, only sunny/partly sunny days
+  if (content === "!sunnydays" || content.startsWith("!sunnydays ")) {
     const args = content.slice("!sunnydays".length).trim();
     if (!args) {
       return message.reply(
-        "**Usage:** `!sunnydays <city>` — shows a 7-day sunny outlook.\n**Available cities:** " +
+        "**Usage:** `!sunnydays <city>` — shows upcoming sunny and partly sunny days.\n**Available cities:** " +
           Object.keys(LOCATIONS).join(", ")
       );
     }
@@ -431,31 +402,27 @@ client.on("messageCreate", async (message) => {
     }
   }
 
-  // !help
-  if (content === "!help" || content === "!sunnyhelp" || content === "!commands") {
+  // !commands / !help / !sunnyhelp
+  if (content === "!commands" || content === "!help" || content === "!sunnyhelp") {
     const embed = new EmbedBuilder()
       .setColor(0xffd700)
       .setTitle("☀️ SunnyBot Commands")
       .addFields(
         {
           name: "`!sunny <city>`",
-          value:
-            "Check if it's currently sunny in a city.\nExample: `!sunny oslo`",
+          value: "Check if it's currently sunny in a city.\nExample: `!sunny oslo`",
         },
         {
           name: "`!sunny lat=<lat> lon=<lon>`",
-          value:
-            "Check weather at custom coordinates.\nExample: `!sunny lat=59.91 lon=10.75`",
+          value: "Check weather at custom coordinates.\nExample: `!sunny lat=59.91 lon=10.75`",
         },
         {
           name: "`!sunnydays <city>`",
-          value:
-            "7-day outlook table showing sunny ☀️ and partly sunny 🌤️ days (no rain).\nExample: `!sunnydays oslo`",
+          value: "Shows only sunny ☀️ and partly sunny 🌤️ days in the next 7 days (no rain).\nExample: `!sunnydays oslo`",
         },
         {
           name: "`!sunwatch <city>`",
-          value:
-            "Watch the sky and get pinged when it turns sunny (runs for 24h).\nExample: `!sunwatch bergen`",
+          value: "Watch the sky and get pinged when it turns sunny (runs for 24h).\nExample: `!sunwatch bergen`",
         },
         {
           name: "Available cities",
