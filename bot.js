@@ -293,7 +293,7 @@ client.on("messageCreate", async (message) => {
   const content = message.content.trim();
 
   // !sunny
-  if (content.startsWith("!sunny")) {
+  if (content === "!sunny" || content.startsWith("!sunny ")) {
     const args = content.slice("!sunny".length).trim();
 
     let lat, lon, locationName;
@@ -347,7 +347,7 @@ client.on("messageCreate", async (message) => {
   }
 
   // !sunwatch — posts when it becomes sunny (checks every hour)
-  if (content.startsWith("!sunwatch")) {
+  if (content === "!sunwatch" || content.startsWith("!sunwatch ")) {
     const args = content.slice("!sunwatch".length).trim();
     if (!args) {
       return message.reply(
