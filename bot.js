@@ -107,9 +107,22 @@ function classifyDay(entries) {
   const sunny = symbols.filter(isSunny).length;
   const partial = symbols.filter(isPartlySunny).length;
 
-  if (sunny / symbols.length >= 0.5) return "sunny";
-  if ((sunny + partial) / symbols.length >= 0.4) return "partlysunny";
+  if (sunny / symbols.length >= 0.7) return "sunny";
+  if ((sunny + partial) / symbols.length >= 0.6) return "partlysunny";
   return "cloudy";
+}
+
+// Check if rain appears before the first sunny/partly sunny period in the day
+function hadRainBeforeSunny(entries) {
+  for (const entry of entries) {
+    const s =
+      entry.data?.next_1_hours?.summary?.symbol_code ||
+      entry.data?.next_6_hours?.summary?.symbol_code;
+    if (!s) continue;
+    if (isSunny(s) || isPartlySunny(s)) return false;
+    if (hasRain(s)) return true;
+  }
+  return false;
 }
 
 function getDayTemps(entries) {
@@ -154,7 +167,8 @@ function buildOutlookEmbed(locationName, timeseries) {
       ? `${Math.round(temps.min)}–${Math.round(temps.max)}°C`
       : "N/A";
     const { icon, label } = COND[condition];
-    return [`${icon} **${dayStr}** — ${label} · ${tempStr}`];
+    const wetRoads = hadRainBeforeSunny(entries) ? " · ⚠️ roads may be wet" : "";
+    return [`${icon} **${dayStr}** — ${label} · ${tempStr}${wetRoads}`];
   });
 
   return new EmbedBuilder()
