@@ -48,6 +48,7 @@ const LOCATIONS = {
   trondheim: { lat: 63.4305, lon: 10.3951, name: "Trondheim" },
   stavanger: { lat: 58.9701, lon: 5.7331, name: "Stavanger" },
   kristiansand: { lat: 58.1599, lon: 8.0182, name: "Kristiansand" },
+  lyngdal: { lat: 58.1341, lon: 7.0747, name: "Lyngdal" },
   tromsø: { lat: 69.6496, lon: 18.9553, name: "Tromsø" },
   london: { lat: 51.5, lon: 0.0, name: "London" },
   paris: { lat: 48.8566, lon: 2.3522, name: "Paris" },
@@ -63,6 +64,16 @@ const LOCATIONS = {
   los_angeles: { lat: 34.0522, lon: -118.2437, name: "Los Angeles" },
   tokyo: { lat: 35.6762, lon: 139.6503, name: "Tokyo" },
   sydney: { lat: -33.8688, lon: 151.2093, name: "Sydney" },
+};
+
+// Active weather alerts: key = `${channelId}:${cityKey}`
+const alerts = new Map();
+
+const COND_DISPLAY = {
+  sunny:       { icon: "☀️",  label: "Sunny" },
+  partlysunny: { icon: "🌤️", label: "Partly Sunny" },
+  cloudy:      { icon: "☁️",  label: "Cloudy" },
+  rain:        { icon: "🌧️", label: "Rain / Precipitation" },
 };
 
 async function getWeather(lat, lon) {
@@ -123,6 +134,19 @@ function hadRainBeforeSunny(entries) {
     if (hasRain(s)) return true;
   }
   return false;
+}
+
+function getCurrentCondition(timeseries) {
+  const symbol =
+    timeseries[0].data?.next_1_hours?.summary?.symbol_code ||
+    timeseries[0].data?.next_6_hours?.summary?.symbol_code ||
+    "";
+  const temp = timeseries[0].data?.instant?.details?.air_temperature;
+  const wind = timeseries[0].data?.instant?.details?.wind_speed;
+  if (isSunny(symbol)) return { condition: "sunny", symbol, temp, wind };
+  if (isPartlySunny(symbol)) return { condition: "partlysunny", symbol, temp, wind };
+  if (hasRain(symbol)) return { condition: "rain", symbol, temp, wind };
+  return { condition: "cloudy", symbol, temp, wind };
 }
 
 function getDayTemps(entries) {
@@ -408,6 +432,106 @@ client.on("messageCreate", async (message) => {
     }
   }
 
+  // !alert <city> [minutes] | !alert stop <city> | !alert list
+  if (content === "!alert" || content.startsWith("!alert ")) {
+    const args = content.slice("!alert".length).trim();
+
+    // !alert list
+    if (args === "list") {
+      const active = [...alerts.entries()]
+        .filter(([key]) => key.startsWith(message.channel.id))
+        .map(([, a]) => `${COND_DISPLAY[a.lastCondition]?.icon ?? "❓"} **${a.loc.name}** — every ${a.intervalMin} min`);
+      return message.reply(
+        active.length
+          ? `**Active alerts in this channel:**\n${active.join("\n")}`
+          : "No active alerts in this channel."
+      );
+    }
+
+    // !alert stop <city>
+    if (args.startsWith("stop ")) {
+      const cityArg = args.slice("stop ".length).trim();
+      const key = `${message.channel.id}:${cityArg.toLowerCase().replace(/\s+/g, "_")}`;
+      const alert = alerts.get(key);
+      if (!alert) return message.reply(`No active alert for **${cityArg}**.`);
+      clearInterval(alert.timer);
+      alerts.delete(key);
+      return message.reply(`🔕 Stopped weather alerts for **${alert.loc.name}**.`);
+    }
+
+    // !alert <city> [minutes]
+    const parts = args.split(/\s+/);
+    const intervalMin = parseInt(parts[parts.length - 1], 10);
+    const hasInterval = !isNaN(intervalMin) && intervalMin >= 5;
+    const cityArg = hasInterval ? parts.slice(0, -1).join(" ") : parts.join(" ");
+    const intervalMs = (hasInterval ? intervalMin : 30) * 60 * 1000;
+    const effectiveMin = hasInterval ? intervalMin : 30;
+
+    if (!cityArg) {
+      return message.reply(
+        "**Usage:**\n`!alert <city> [minutes]` — start alerts (default 30 min)\n`!alert stop <city>` — stop alerts\n`!alert list` — list active alerts"
+      );
+    }
+
+    const cityKey = cityArg.toLowerCase().replace(/\s+/g, "_");
+    const loc = LOCATIONS[cityKey];
+    if (!loc) {
+      return message.reply(
+        `Unknown city **${cityArg}**. Available: ${Object.keys(LOCATIONS).join(", ")}`
+      );
+    }
+
+    const alertKey = `${message.channel.id}:${cityKey}`;
+    if (alerts.has(alertKey)) {
+      clearInterval(alerts.get(alertKey).timer);
+    }
+
+    // Fetch initial condition so we only alert on *changes*
+    let lastCondition;
+    try {
+      const data = await getWeather(loc.lat, loc.lon);
+      lastCondition = getCurrentCondition(data.properties.timeseries).condition;
+    } catch {
+      return message.reply("⚠️ Could not reach the weather API. Try again.");
+    }
+
+    const timer = setInterval(async () => {
+      try {
+        const data = await getWeather(loc.lat, loc.lon);
+        const { condition, symbol, temp, wind } = getCurrentCondition(data.properties.timeseries);
+        const entry = alerts.get(alertKey);
+        if (!entry) return;
+
+        if (condition !== entry.lastCondition) {
+          const prev = COND_DISPLAY[entry.lastCondition] ?? { icon: "❓", label: entry.lastCondition };
+          const curr = COND_DISPLAY[condition] ?? { icon: "❓", label: condition };
+          const embed = new EmbedBuilder()
+            .setColor(condition === "sunny" ? 0xffd700 : condition === "rain" ? 0x5b8dee : 0x95a5a6)
+            .setTitle(`${curr.icon} Weather changed in ${loc.name}!`)
+            .setDescription(`${prev.icon} **${prev.label}** → ${curr.icon} **${curr.label}**`)
+            .addFields(
+              { name: "🌡️ Temperature", value: temp != null ? `${Math.round(temp)}°C` : "N/A", inline: true },
+              { name: "💨 Wind", value: wind != null ? `${Math.round(wind)} m/s` : "N/A", inline: true },
+              { name: "🔎 Condition", value: symbol.replace(/_/g, " "), inline: true }
+            )
+            .setFooter({ text: "Powered by Yr / MET Norway • yr.no" })
+            .setTimestamp();
+
+          message.channel.send({ embeds: [embed] });
+          entry.lastCondition = condition;
+        }
+      } catch (e) {
+        console.error("alert error:", e);
+      }
+    }, intervalMs);
+
+    alerts.set(alertKey, { loc, intervalMin: effectiveMin, lastCondition, timer });
+    const { icon, label } = COND_DISPLAY[lastCondition] ?? { icon: "❓", label: lastCondition };
+    message.reply(
+      `🔔 Weather alerts set for **${loc.name}** — checking every **${effectiveMin} min**.\nCurrent condition: ${icon} ${label}\nUse \`!alert stop ${cityArg}\` to cancel.`
+    );
+  }
+
   // !commands / !help / !sunnyhelp
   if (content === "!commands" || content === "!help" || content === "!sunnyhelp") {
     const embed = new EmbedBuilder()
@@ -429,6 +553,10 @@ client.on("messageCreate", async (message) => {
         {
           name: "`!sunwatch <city>`",
           value: "Watch the sky and get pinged when it turns sunny (runs for 24h).\nExample: `!sunwatch bergen`",
+        },
+        {
+          name: "`!alert <city> [minutes]`",
+          value: "Get alerted whenever the weather condition changes (default every 30 min).\n`!alert stop <city>` — stop alerts · `!alert list` — list active alerts\nExample: `!alert oslo 15`",
         },
         {
           name: "Available cities",
